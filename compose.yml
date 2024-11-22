@@ -1,0 +1,11 @@
+services:
+  sigul-bridge:
+    image: quay.io/jeremycline/sigul-pesign-bridge-ci:latest
+    ports:
+      - 44333:44333
+    entrypoint: /usr/sbin/sigul_bridge
+  sigul-server:
+    depends_on:
+      - sigul-bridge
+    image: quay.io/jeremycline/sigul-pesign-bridge-ci:latest
+    entrypoint: /usr/sbin/sigul_server
