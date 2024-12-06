@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -e
+set -euo pipefail
 
 # Default key type is gpg. Server also says it supports RSA, but crashes the server if used..
 printf 'my-password\0my-password\0' | sigul --batch -v -v \
@@ -28,3 +28,6 @@ printf 'my-password\0' | sigul --batch -v -v \
 		--certificate-type codesigning \
 		--subject-common-name="Code Signing" \
 		--subject-state="MI" > signing-cert.pem
+
+printf 'my-password\0my-password\0' | sigul --batch -v -v \
+    --config-file=devel/sigul-client.conf -v -v list-keys

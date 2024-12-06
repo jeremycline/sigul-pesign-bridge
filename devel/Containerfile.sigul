@@ -21,7 +21,11 @@ RUN dnf install -y \
     python3-pip \
     python3-devel \
     rpm-devel \
-    gcc
+    gcc \
+    cargo \
+    grub2-efi-x64 \
+    sbsigntools \
+    iproute
 
 # Not packaged for fedora, needed for the server. Requires pip and gcc
 RUN pip install rpm-head-signing
@@ -45,5 +49,9 @@ COPY sigul-bridge.conf /etc/sigul/bridge.conf
 COPY sigul-server.conf /etc/sigul/server.conf
 COPY sigul-client.conf /etc/sigul/client.conf
 COPY sigul_key_setup.sh /usr/local/bin/sigul_key_setup
+COPY startup_wrapper.sh /usr/local/bin/sigul_wrapper
 RUN sigul_server_create_db
 RUN printf "my-password\0" | sigul_server_add_admin --batch --name=sigul-client
+
+# A hacky work-around for GitHub actions not letting you specify the entrypoint for a container
+ENTRYPOINT /usr/local/bin/sigul_wrapper
