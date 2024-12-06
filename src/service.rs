@@ -490,6 +490,19 @@ async fn sign_attached_with_filetype(
     drop(input_file);
     drop(output_file);
 
+    // TODO: Ferry to sigul:
+    // ```
+    // sigul --config-file=/path/to/file
+    //   --user-name=user
+    //   --batch
+    //   --passphrase-file=/path/to/file
+    //   pe-sign
+    //   --output=/path/to/output/file
+    //   <key-name> // "key" in sigul. Paired with the cert?
+    //   <cert-name> // name of cert in sigul to sign with
+    //   </path/to/input/file>
+    // ```
+
     // TODO: If we fail to sign the binary, we need to respond with an error to the client
     let mut buf = bytes::BytesMut::new();
     buf.put_u32_ne(PESIGND_VERSION);
