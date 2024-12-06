@@ -59,3 +59,47 @@ jobs:
 
       - name: cargo test
         run: cargo test --all-features --workspace --no-fail-fast
+
+  integration-tests:
+    name: Sigul Integration Tests
+    runs-on: ubuntu-latest
+    container: quay.io/jeremycline/sigul-pesign-bridge-ci:latest
+    services:
+      sigul-bridge:
+        image: quay.io/jeremycline/sigul-pesign-bridge-ci:latest
+        env:
+          RUN_SIGUL_BRIDGE: true
+        ports:
+          # Server connects to this port
+          - 44333:44333
+          # Client connects to this port
+          - 44334:44334
+      sigul-server:
+        image: quay.io/jeremycline/sigul-pesign-bridge-ci:latest
+        env:
+          RUN_SIGUL_SERVER: true
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up test environment
+        run: |
+          bash ./devel/sigul_key_setup.sh
+          printf 'my-password\0my-password\0' | sigul --batch --config-file=devel/sigul-client.conf -v -v list-keys
+
+          cargo build
+          umask 027
+          cargo run -- --socket=/run/pesign/socket listen &
+          sleep 2
+          #pesign-client --token="my token" --certificate="my certificate" \
+          #  --sign --infile=/boot/efi/EFI/almalinux/grubx64.efi \
+          #  --outfile=grubx64-selfsigned.efi
+          pesign-client --token="my token" --certificate="my certificate" \
+            --sign --infile=README.md \
+            --outfile=README.md.signed
+
+          # List the signatures
+          #pesign -i grubx64-selfsigned.efi -l
+          cat README.md.signed

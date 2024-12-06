@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -e
+set -euo pipefail
 
 # Default key type is gpg. Server also says it supports RSA, but crashes the server if used..
 printf 'my-password\0my-password\0' | sigul --batch -v -v \
