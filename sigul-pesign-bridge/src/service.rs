@@ -516,7 +516,12 @@ async fn sign_attached_with_filetype(
 }
 
 #[instrument(skip_all, ret)]
-async fn forward_pe_file(mut input: File, mut output: File, key_name: &str, cert_name: &str) -> anyhow::Result<()> {
+async fn forward_pe_file(
+    mut input: File,
+    mut output: File,
+    key_name: &str,
+    cert_name: &str,
+) -> anyhow::Result<()> {
     // TODO: Don't ship this, it's not secure. Sigul wants a file path and we can't pass fds with the Command API.
     let mut temp_input_file = tempfile::NamedTempFile::new()?;
 
@@ -528,14 +533,20 @@ async fn forward_pe_file(mut input: File, mut output: File, key_name: &str, cert
 
     let mut command = tokio::process::Command::new("sigul");
     // TODO: Decide on config
-    let result = command.args(&[
-        "-v",
-        "-v", "--batch", "--user-name=sigul-client", "--passphrase-file=/nss_db_password",
-        "sign-pe",
-        key_name,
-        cert_name,
-        temp_input_file.path().to_str().unwrap(),
-    ]).output().await?;
+    let result = command
+        .args([
+            "-v",
+            "-v",
+            "--batch",
+            "--user-name=sigul-client",
+            "--passphrase-file=./nss_db_password",
+            "sign-pe",
+            key_name,
+            cert_name,
+            temp_input_file.path().to_str().unwrap(),
+        ])
+        .output()
+        .await?;
 
     let signed_bytes_length = result.stdout.len();
     tracing::info!(?signed_bytes_length, "Finished signing");
