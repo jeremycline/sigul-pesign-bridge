@@ -57,7 +57,7 @@ fn run_command(mut client_command: Command) -> Result<(Output, Output)> {
         std::thread::sleep(Duration::from_millis(5));
         tries += 1;
         if tries > 100 {
-            return Err(anyhow!("Faild to start service: {error:?}"));
+            return Err(anyhow!("Failed to start service: {error:?}"));
         }
     }
 
@@ -97,6 +97,9 @@ fn sign_attached() -> Result<()> {
     let mut out_file = NamedTempFile::new()?;
     in_file.write_all(b"Pineapple on pizza is good")?;
     in_file.flush()?;
+    let mut in_file = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    in_file.push("tests/uwufi.efi");
+
 
     let mut client_command = Command::new("pesign-client");
     client_command

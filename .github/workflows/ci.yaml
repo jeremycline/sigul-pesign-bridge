@@ -57,8 +57,8 @@ jobs:
           sudo mkdir -p /run/pesign/
           sudo chmod -R 777 /run/pesign/
 
-      - name: cargo test
-        run: cargo test --all-features --workspace --no-fail-fast
+      - name: Run unit tests
+        run: cargo test --all-features --workspace --no-fail-fast --bins --examples --benches
 
   integration-tests:
     name: Sigul Integration Tests
@@ -91,10 +91,7 @@ jobs:
           bash ./devel/sigul_key_setup.sh
           printf 'my-password\0my-password\0' | sigul --batch --config-file=devel/sigul-client.conf -v -v list-keys
 
-          cargo build
-          umask 027
-          cargo run -- --socket=/run/pesign/socket listen &
-          sleep 2
+          cargo test --all-features --workspace --no-fail-fast
 
           pesign-client --token="my token" --certificate="my certificate" \
             --sign --infile=/boot/efi/EFI/almalinux/grubx64.efi \
