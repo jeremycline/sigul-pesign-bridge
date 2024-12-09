@@ -9,7 +9,8 @@
 // read/write to `/run/pesign/socket`.
 
 use std::{
-    io::{Read, Write},
+    io::Write,
+    path::PathBuf,
     process::{Command, Output, Stdio},
     sync::{Mutex, Once},
     time::Duration,
@@ -57,7 +58,7 @@ fn run_command(mut client_command: Command) -> Result<(Output, Output)> {
         std::thread::sleep(Duration::from_millis(5));
         tries += 1;
         if tries > 100 {
-            return Err(anyhow!("Faild to start service: {error:?}"));
+            return Err(anyhow!("Failed to start service: {error:?}"));
         }
     }
 
@@ -93,17 +94,15 @@ fn is_unlocked() -> Result<()> {
 
 #[test]
 fn sign_attached() -> Result<()> {
-    let mut in_file = NamedTempFile::new()?;
-    let mut out_file = NamedTempFile::new()?;
-    in_file.write_all(b"Pineapple on pizza is good")?;
-    in_file.flush()?;
+    let out_file = NamedTempFile::new()?;
+    let in_file = PathBuf::from("/srv/siguldry/target/x86_64-unknown-uefi/debug/sample-uefi.efi");
 
     let mut client_command = Command::new("pesign-client");
     client_command
         .arg("--sign")
         .arg("--token=Test Cert DB")
         .arg("--certificate=Test Certificate")
-        .arg(format!("--infile={}", in_file.path().display()))
+        .arg(format!("--infile={}", in_file.as_path().display()))
         .arg(format!("--outfile={}", out_file.path().display()));
     let (client_output, service_output) = run_command(client_command)?;
 
@@ -112,9 +111,24 @@ fn sign_attached() -> Result<()> {
     assert!(client_output.status.success());
     assert!(service_output.status.success());
 
-    let mut buf = String::new();
-    out_file.read_to_string(&mut buf)?;
-    assert_eq!(buf, "Pineapple on pizza is good\nSigned, Jeremy\n");
+    let input_signature_list = Command::new("sbverify")
+        .arg("--list")
+        .arg(in_file.as_path())
+        .output()?;
+    println!("{}", String::from_utf8_lossy(&input_signature_list.stdout));
+    let output_signature_list = Command::new("sbverify")
+        .arg("--list")
+        .arg(out_file.path())
+        .output()?;
+    println!("{}", String::from_utf8_lossy(&output_signature_list.stdout));
+
+    let signing_cert = PathBuf::from("/srv/siguldry/signing-cert.pem");
+    let output_signed = Command::new("sbverify")
+        .arg("--cert")
+        .arg(signing_cert)
+        .arg(out_file.path())
+        .output()?;
+    assert!(output_signed.status.success());
 
     Ok(())
 }
