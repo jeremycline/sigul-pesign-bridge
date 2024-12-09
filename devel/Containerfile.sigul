@@ -23,7 +23,6 @@ RUN dnf install -y \
     rpm-devel \
     gcc \
     cargo \
-    grub2-efi-x64 \
     sbsigntools \
     iproute
 
@@ -35,6 +34,9 @@ RUN curl -sL \
 	https://pagure.io/fork/jcline/sigul/c/5b160415b77d40ea80aeb9d9eb1a8c9ec6cf1926.patch \
 	| patch /usr/share/sigul/server.py
 
+RUN mkdir -p /srv/siguldry && chown sigul:sigul /srv/siguldry
+WORKDIR /srv/siguldry
+
 RUN echo "my-password" > nss_db_password
 RUN echo "this is a noise file to generate a key from, but we don't care about it being secure" > seed_file
 RUN certutil -z ./seed_file -d /var/lib/sigul -N -f nss_db_password
@@ -45,11 +47,19 @@ RUN certutil -z ./seed_file -d /var/lib/sigul -S -f nss_db_password -n sigul-cli
 # The sigul server crashes if you don't create its keys directory.
 RUN mkdir -p /var/lib/sigul/keys
 RUN chown -R sigul:sigul /var/lib/sigul/
-COPY sigul-bridge.conf /etc/sigul/bridge.conf
-COPY sigul-server.conf /etc/sigul/server.conf
-COPY sigul-client.conf /etc/sigul/client.conf
-COPY sigul_key_setup.sh /usr/local/bin/sigul_key_setup
-COPY startup_wrapper.sh /usr/local/bin/sigul_wrapper
+COPY devel/sigul-bridge.conf /etc/sigul/bridge.conf
+COPY devel/sigul-server.conf /etc/sigul/server.conf
+COPY devel/sigul-client.conf /etc/sigul/client.conf
+COPY devel/sigul_key_setup.sh /usr/local/bin/sigul_key_setup
+COPY devel/startup_wrapper.sh /usr/local/bin/sigul_wrapper
+
+# It's a gross little hack, but we copy in the example PE executable rather than dealing
+# with not having rustup in EL9 repos and getting additional targets installed.
+#
+# This needs to be built with 'cargo build --target x86_64-unknown-uefi -p sample-uefi'
+RUN mkdir -p target/x86_64-unknown-uefi/debug/
+COPY target/x86_64-unknown-uefi/debug/sample-uefi.efi target/x86_64-unknown-uefi/debug/sample-uefi.efi
+
 RUN sigul_server_create_db
 RUN printf "my-password\0" | sigul_server_add_admin --batch --name=sigul-client
 

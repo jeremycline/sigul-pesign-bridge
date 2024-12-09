@@ -8,7 +8,7 @@ printf 'my-password\0my-password\0' | sigul --batch -v -v \
 
 # The sigul server crashes if you try to have it create the RSA key.
 # Importing an RSA key works, fortunately, and sigul requires an RSA key with pesign.
-openssl genrsa -aes128 -passout file:/nss_db_password -out signing-keypair.pem
+openssl genrsa -aes128 -passout file:/srv/siguldry/nss_db_password -out signing-keypair.pem
 printf 'my-password\0my-password\0my-password\0' | sigul --batch -v -v \
 	import-key --key-admin=sigul-client --key-type=RSA signing-key signing-keypair.pem
 
