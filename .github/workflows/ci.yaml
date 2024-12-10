@@ -131,8 +131,11 @@ jobs:
 
       - name: Set up test environment
         run: |
-          set -euo pipefail
+          set -xeuo pipefail
 
+          mkdir -p ~/.sigul
+          cp devel/sigul-client.conf ~/.sigul/client.conf
+          cp -r /var/lib/sigul ~/.sigul/sigul
           bash ./devel/sigul_key_setup.sh
 
           # More hackiness; copy the test PE and signing certificates to the location

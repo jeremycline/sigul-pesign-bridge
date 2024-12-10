@@ -10,6 +10,7 @@ use std::{
         unix::fs::PermissionsExt,
     },
     path::PathBuf,
+    process::Stdio,
     time::Duration,
 };
 
@@ -519,8 +520,8 @@ async fn sign_attached_with_filetype(
 async fn forward_pe_file(
     mut input: File,
     mut output: File,
-    key_name: &str,
-    cert_name: &str,
+    _key_name: &str,
+    _cert_name: &str,
 ) -> anyhow::Result<()> {
     // TODO: Don't ship this, it's not secure. Sigul wants a file path and we can't pass fds with the Command API.
     let mut temp_input_file = tempfile::NamedTempFile::new()?;
@@ -529,29 +530,47 @@ async fn forward_pe_file(
     let r = input.read_to_end(&mut buf)?;
     tracing::info!(filesize_bytes=?r, "Read full input file");
     temp_input_file.write_all(&buf)?;
+    temp_input_file.flush()?;
     tracing::info!(filesize_bytes=?r, "Wrote full input file");
 
     let mut command = tokio::process::Command::new("sigul");
-    // TODO: Decide on config
-    let result = command
+    command
         .args([
             "-v",
             "-v",
             "--batch",
             "--user-name=sigul-client",
-            "--passphrase-file=./nss_db_password",
             "sign-pe",
-            key_name,
-            cert_name,
+            "--output=/tmp/signed.efi",
+            "signing-key",
+            "codesigning",
             temp_input_file.path().to_str().unwrap(),
         ])
-        .output()
-        .await?;
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdout(Stdio::piped());
+    tracing::debug!(?command, "Issuing signing request via sigul client");
+    let mut child = command.spawn()?;
+    let result = tokio::time::timeout(Duration::from_secs(30), async {
+        if let Some(stdin) = &mut child.stdin {
+            stdin.write_all(b"my-password\0").await?;
+            tracing::info!("Wrote password to stdin");
+        }
+        tracing::info!("Waiting on child to complete");
+        child.wait_with_output().await
+    })
+    .await??;
 
-    let signed_bytes_length = result.stdout.len();
-    tracing::info!(?signed_bytes_length, "Finished signing");
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    tracing::info!(?command, status=?result.status, ?stderr, ?stdout, "sigul command returned");
 
-    output.write_all(&result.stdout)?;
+    let mut buf = vec![];
+    let mut temp_output_file = File::open("/tmp/signed.efi")?;
+    let signed_bytes = temp_output_file.read_to_end(&mut buf)?;
+    tracing::info!(?signed_bytes, "Finished signing");
+
+    output.write_all(&buf)?;
 
     Ok(())
 }

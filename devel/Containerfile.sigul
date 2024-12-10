@@ -62,6 +62,7 @@ COPY target/x86_64-unknown-uefi/debug/sample-uefi.efi target/x86_64-unknown-uefi
 
 RUN sigul_server_create_db
 RUN printf "my-password\0" | sigul_server_add_admin --batch --name=sigul-client
+RUN mkdir ~/.sigul/ && cp -r /var/lib/sigul ~/.sigul/sigul
 
 # A hacky work-around for GitHub actions not letting you specify the entrypoint for a container
 ENTRYPOINT /usr/local/bin/sigul_wrapper
