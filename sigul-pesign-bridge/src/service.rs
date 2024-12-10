@@ -10,6 +10,7 @@ use std::{
         unix::fs::PermissionsExt,
     },
     path::PathBuf,
+    process::Stdio,
     time::Duration,
 };
 
@@ -478,17 +479,31 @@ async fn sign_attached_with_filetype(
         }
     }
 
-    let [mut input_file, mut output_file]: [File; 2] = files
+    let [input_file, output_file]: [File; 2] = files
         .try_into()
         .map_err(|error| anyhow!("Client did not send the expected number of files: {error:?}"))?;
 
-    let mut in_file_text = String::new();
-    let in_file_size = input_file.read_to_string(&mut in_file_text).ok();
-    tracing::info!(?in_file_size, ?in_file_text, "read from fd");
-    in_file_text += "\nSigned, Jeremy\n";
-    output_file.write_all(in_file_text.as_bytes())?;
-    drop(input_file);
-    drop(output_file);
+    forward_pe_file(input_file, output_file, "key-name", "cert-name").await?;
+    //let mut in_file_text = String::new();
+    //let in_file_size = input_file.read_to_string(&mut in_file_text).ok();
+    //tracing::info!(?in_file_size, ?in_file_text, "read from fd");
+    //in_file_text += "\nSigned, Jeremy\n";
+    //output_file.write_all(in_file_text.as_bytes())?;
+    //drop(input_file);
+    //drop(output_file);
+
+    // TODO: Ferry to sigul:
+    // ```
+    // sigul --config-file=/path/to/file
+    //   --user-name=user
+    //   --batch
+    //   --passphrase-file=/path/to/file
+    //   pe-sign
+    //   --output=/path/to/output/file
+    //   <key-name> // "key" in sigul. Paired with the cert?
+    //   <cert-name> // name of cert in sigul to sign with
+    //   </path/to/input/file>
+    // ```
 
     // TODO: If we fail to sign the binary, we need to respond with an error to the client
     let mut buf = bytes::BytesMut::new();
@@ -497,6 +512,65 @@ async fn sign_attached_with_filetype(
     buf.put_u32_ne(4_u32);
     buf.put_i32_ne(0_i32);
     connection.write_all_buf(&mut buf).await?;
+
+    Ok(())
+}
+
+#[instrument(skip_all, ret)]
+async fn forward_pe_file(
+    mut input: File,
+    mut output: File,
+    _key_name: &str,
+    _cert_name: &str,
+) -> anyhow::Result<()> {
+    // TODO: Don't ship this, it's not secure. Sigul wants a file path and we can't pass fds with the Command API.
+    let mut temp_input_file = tempfile::NamedTempFile::new()?;
+
+    let mut buf = vec![];
+    let r = input.read_to_end(&mut buf)?;
+    tracing::info!(filesize_bytes=?r, "Read full input file");
+    temp_input_file.write_all(&buf)?;
+    temp_input_file.flush()?;
+    tracing::info!(filesize_bytes=?r, "Wrote full input file");
+
+    let mut command = tokio::process::Command::new("sigul");
+    command
+        .args([
+            "-v",
+            "-v",
+            "--batch",
+            "--user-name=sigul-client",
+            "sign-pe",
+            "--output=/tmp/signed.efi",
+            "signing-key",
+            "codesigning",
+            temp_input_file.path().to_str().unwrap(),
+        ])
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdout(Stdio::piped());
+    tracing::debug!(?command, "Issuing signing request via sigul client");
+    let mut child = command.spawn()?;
+    let result = tokio::time::timeout(Duration::from_secs(30), async {
+        if let Some(stdin) = &mut child.stdin {
+            stdin.write_all(b"my-password\0").await?;
+            tracing::info!("Wrote password to stdin");
+        }
+        tracing::info!("Waiting on child to complete");
+        child.wait_with_output().await
+    })
+    .await??;
+
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    tracing::info!(?command, status=?result.status, ?stderr, ?stdout, "sigul command returned");
+
+    let mut buf = vec![];
+    let mut temp_output_file = File::open("/tmp/signed.efi")?;
+    let signed_bytes = temp_output_file.read_to_end(&mut buf)?;
+    tracing::info!(?signed_bytes, "Finished signing");
+
+    output.write_all(&buf)?;
 
     Ok(())
 }
