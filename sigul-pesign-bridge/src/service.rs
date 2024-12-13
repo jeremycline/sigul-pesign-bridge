@@ -2,14 +2,15 @@
 // Copyright (c) Microsoft Corporation.
 
 use std::{
+    env,
     ffi::CStr,
     fs::File,
-    io::{self, IoSliceMut, Read, Write},
+    io::{self, IoSliceMut},
     os::{
         fd::{AsFd, AsRawFd, FromRawFd, RawFd},
         unix::fs::PermissionsExt,
     },
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
 };
@@ -63,10 +64,14 @@ struct Header {
     payload_length: usize,
 }
 
-impl TryFrom<[u8; PESIGN_HEADER_SIZE]> for Header {
+impl TryFrom<&[u8]> for Header {
     type Error = anyhow::Error;
 
-    fn try_from(value: [u8; PESIGN_HEADER_SIZE]) -> Result<Self, Self::Error> {
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        if value.len() != PESIGN_HEADER_SIZE {
+            return Err(anyhow!("Invalid header size"));
+        }
+
         let mut header = value
             .chunks_exact(std::mem::size_of::<u32>())
             .map(|chunk| chunk.try_into().map(u32::from_ne_bytes));
@@ -100,6 +105,73 @@ impl TryFrom<[u8; PESIGN_HEADER_SIZE]> for Header {
         Ok(Self {
             command,
             payload_length,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+struct SignAttachedRequest {
+    token_name: String,
+    certificate_name: String,
+}
+
+impl TryFrom<&[u8]> for SignAttachedRequest {
+    type Error = anyhow::Error;
+
+    /// Attempt to parse the request from the payload bytes.
+    ///
+    /// A valid request is composed of:
+    ///
+    /// 1. FILE_TYPE (u32) - The file type.
+    /// 2. TOKEN_LEN (u32) - The length of the token name string.
+    /// 3. TOKEN_NAME ([u8; TOKEN_LEN]) - A null-terminated string identifying the token
+    ///    to use when signing.
+    /// 4. CERT_LEN (u32) - The length of the certificate name string.
+    /// 5. CERT_NAME ([u8; CERT_LEN]) - A null-terminated string identifying the certificate
+    ///    to use when signing.
+    fn try_from(payload: &[u8]) -> Result<Self, Self::Error> {
+        if payload.len() < std::mem::size_of::<u32>() * 3 {
+            return Err(anyhow!("Request payload is too small"));
+        }
+
+        // pesign also defines a type for kernel modules, but at the moment we don't do anything for those.
+        let (file_type, remaining_payload) = payload.split_at(std::mem::size_of::<u32>());
+        let file_type = file_type.try_into().map(u32::from_ne_bytes)?;
+        if file_type != 0 {
+            return Err(anyhow!("Unsupported file type; only PE type supported"));
+        }
+
+        let (token_length, remaining_payload) =
+            remaining_payload.split_at(std::mem::size_of::<u32>());
+        let token_length: usize = token_length
+            .try_into()
+            .map(u32::from_ne_bytes)?
+            .try_into()?;
+        if token_length > remaining_payload.len() {
+            return Err(anyhow!(
+                "Malformed request; token length longer than payload"
+            ));
+        }
+        let (token_name, remaining_payload) = remaining_payload.split_at(token_length);
+        let token = CStr::from_bytes_until_nul(token_name)?
+            .to_str()?
+            .to_string();
+
+        let (cert_length, remaining_payload) =
+            remaining_payload.split_at(std::mem::size_of::<u32>());
+        let cert_length: usize = cert_length.try_into().map(u32::from_ne_bytes)?.try_into()?;
+        if cert_length != remaining_payload.len() {
+            return Err(anyhow!(
+                "Malformed request; certificate name length doesn't match payload size"
+            ));
+        }
+        let certificate = CStr::from_bytes_until_nul(remaining_payload)?
+            .to_str()?
+            .to_string();
+
+        Ok(Self {
+            token_name: token,
+            certificate_name: certificate,
         })
     }
 }
@@ -211,7 +283,7 @@ async fn request_handler(mut unix_stream: UnixStream) -> Result<(), anyhow::Erro
         let mut buf = [0_u8; PESIGN_HEADER_SIZE];
         match unix_stream.read_exact(&mut buf).await {
             Ok(_bytes_read) => {
-                let request: Header = buf.try_into()?;
+                let request: Header = buf.as_slice().try_into()?;
                 tracing::debug!(?request, "Client request received");
 
                 match request.command {
@@ -383,12 +455,15 @@ async fn sign_attached_with_filetype(
     connection.read_exact(&mut payload).await?;
     tracing::trace!(?payload_length, ?payload, "Read payload");
 
-    let raw_fd = connection.as_fd().as_raw_fd();
+    let request = SignAttachedRequest::try_from(payload.as_slice())?;
+    tracing::info!(?request.token_name, ?request.certificate_name, "Client signing request received");
+
     // Both the Rust standard library and tokio don't include support for ancillary data
     // over Unix sockets. Instead, we use the nix library's blocking interface to retrieve
     // the file descriptors from the client.
     //
     // https://github.com/rust-lang/rust/issues/76915
+    let raw_fd = connection.as_fd().as_raw_fd();
     let cmsgs = tokio::task::spawn_blocking(move || {
         let mut cmsgs = vec![];
         let mut iovs = vec![];
@@ -479,31 +554,52 @@ async fn sign_attached_with_filetype(
         }
     }
 
-    let [input_file, output_file]: [File; 2] = files
+    let [mut input_file, mut output_file]: [File; 2] = files
         .try_into()
         .map_err(|error| anyhow!("Client did not send the expected number of files: {error:?}"))?;
 
-    forward_pe_file(input_file, output_file, "key-name", "cert-name").await?;
-    //let mut in_file_text = String::new();
-    //let in_file_size = input_file.read_to_string(&mut in_file_text).ok();
-    //tracing::info!(?in_file_size, ?in_file_text, "read from fd");
-    //in_file_text += "\nSigned, Jeremy\n";
-    //output_file.write_all(in_file_text.as_bytes())?;
-    //drop(input_file);
-    //drop(output_file);
+    let runtime_directory = env::var("RUNTIME_DIRECTORY").unwrap_or_else(|error| {
+        tracing::warn!(?error, "Failed to read RUNTIME_DIRECTORY environment variable, falling back to /run/sigul-pesign-bridge/");
+        "/run/sigul-pesign-bridge/".into()
+    });
+    let temp_dir = tempfile::Builder::new()
+        .prefix(".work")
+        .rand_bytes(16)
+        .tempdir_in(&runtime_directory)
+        .inspect_err(|error| {
+            tracing::error!(
+                ?error,
+                ?runtime_directory,
+                "Failed to make temporary directory inside the runtime directory"
+            );
+        })?;
+    let sigul_input = temp_dir.path().join("unsigned_file");
+    let sigul_output = temp_dir.path().join("signed_file");
+    let mut sigul_input_file = std::fs::File::options().create(true).write(true).truncate(true).open(&sigul_input).inspect_err(|error| {
+        tracing::error!(?error, path=?sigul_input, "Failed to open the temporary file used for sigul input");
+    })?;
+    let input_bytes = std::io::copy(&mut input_file, &mut sigul_input_file).inspect_err(|error| {
+        tracing::error!(?error, path=?sigul_input, "Failed to copy the input file to a temporary file for sigul input")
+    })?;
+    tracing::info!(input_bytes, "Forwarding PE file to Sigul for signing");
 
-    // TODO: Ferry to sigul:
-    // ```
-    // sigul --config-file=/path/to/file
-    //   --user-name=user
-    //   --batch
-    //   --passphrase-file=/path/to/file
-    //   pe-sign
-    //   --output=/path/to/output/file
-    //   <key-name> // "key" in sigul. Paired with the cert?
-    //   <cert-name> // name of cert in sigul to sign with
-    //   </path/to/input/file>
-    // ```
+    forward_pe_file(
+        &sigul_input,
+        &sigul_output,
+        &request.token_name,
+        &request.certificate_name,
+    )
+    .await?;
+
+    // TODO validation here
+
+    let mut sigul_output_file = std::fs::File::options().create(false).read(true).open(&sigul_output).inspect_err(|error| {
+        tracing::error!(?error, path=?sigul_output, "Failed to open the temporary file used for sigul output");
+    })?;
+    let signed_bytes = std::io::copy(&mut sigul_output_file, &mut output_file).inspect_err(|error| {
+        tracing::error!(?error, path=?sigul_input, "Failed to copy the input file to a temporary file for sigul input")
+    })?;
+    tracing::info!(?signed_bytes, "Signing request completed");
 
     // TODO: If we fail to sign the binary, we need to respond with an error to the client
     let mut buf = bytes::BytesMut::new();
@@ -518,21 +614,11 @@ async fn sign_attached_with_filetype(
 
 #[instrument(skip_all, ret)]
 async fn forward_pe_file(
-    mut input: File,
-    mut output: File,
-    _key_name: &str,
-    _cert_name: &str,
+    input: &Path,
+    output: &Path,
+    key_name: &str,
+    cert_name: &str,
 ) -> anyhow::Result<()> {
-    // TODO: Don't ship this, it's not secure. Sigul wants a file path and we can't pass fds with the Command API.
-    let mut temp_input_file = tempfile::NamedTempFile::new()?;
-
-    let mut buf = vec![];
-    let r = input.read_to_end(&mut buf)?;
-    tracing::info!(filesize_bytes=?r, "Read full input file");
-    temp_input_file.write_all(&buf)?;
-    temp_input_file.flush()?;
-    tracing::info!(filesize_bytes=?r, "Wrote full input file");
-
     let mut command = tokio::process::Command::new("sigul");
     command
         .args([
@@ -541,10 +627,11 @@ async fn forward_pe_file(
             "--batch",
             "--user-name=sigul-client",
             "sign-pe",
-            "--output=/tmp/signed.efi",
-            "signing-key",
-            "codesigning",
-            temp_input_file.path().to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+            key_name,
+            cert_name,
+            input.to_str().unwrap(),
         ])
         .stdin(Stdio::piped())
         .stderr(Stdio::piped())
@@ -565,13 +652,6 @@ async fn forward_pe_file(
     let stdout = String::from_utf8_lossy(&result.stdout);
     tracing::info!(?command, status=?result.status, ?stderr, ?stdout, "sigul command returned");
 
-    let mut buf = vec![];
-    let mut temp_output_file = File::open("/tmp/signed.efi")?;
-    let signed_bytes = temp_output_file.read_to_end(&mut buf)?;
-    tracing::info!(?signed_bytes, "Finished signing");
-
-    output.write_all(&buf)?;
-
     Ok(())
 }
 
@@ -584,10 +664,13 @@ mod tests {
     use anyhow::{anyhow, Result};
     use bytes::{BufMut, BytesMut};
     use nix::sys::stat::Mode;
+    use proptest::prelude::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_util::sync::CancellationToken;
 
-    use super::{CMD_GET_CMD_VERSION, PESIGND_VERSION};
+    use super::{
+        Header, SignAttachedRequest, CMD_GET_CMD_VERSION, PESIGND_VERSION, PESIGN_MAX_PAYLOAD,
+    };
 
     static UMASK: Once = Once::new();
 
@@ -597,6 +680,65 @@ mod tests {
             umask.insert(Mode::S_IRWXO);
             nix::sys::stat::umask(umask);
         });
+    }
+
+    proptest! {
+        // Regardless of header correctness, it should never crash.
+        #[test]
+        fn header_never_panics(payload in prop::array::uniform12(u8::MIN..u8::MAX)) {
+            let _ = Header::try_from(payload.as_slice());
+        }
+
+        #[test]
+        fn header_valid_commands(mut payload in vec![0..8u32, 0..1024u32]) {
+            payload.insert(0, PESIGND_VERSION);
+            let payload = payload.into_iter().flat_map(|b| b.to_ne_bytes()).collect::<Vec<_>>();
+            Header::try_from(payload.as_slice()).unwrap();
+        }
+
+        #[test]
+        fn header_invalid_commands(mut payload in vec![8..u32::MAX, 0..1024u32]) {
+            payload.insert(0, PESIGND_VERSION);
+            let payload = payload.into_iter().flat_map(|b| b.to_ne_bytes()).collect::<Vec<_>>();
+            if Header::try_from(payload.as_slice()).is_ok() {
+                panic!("Header shouldn't contain a command over 8");
+            }
+        }
+
+        #[test]
+        fn header_payload_size(payload_size in 0..1024u32) {
+            let payload = vec![PESIGND_VERSION, 8, payload_size];
+            let payload = payload.into_iter().flat_map(|b| b.to_ne_bytes()).collect::<Vec<_>>();
+            let result = Header::try_from(payload.as_slice());
+            if payload_size > PESIGN_MAX_PAYLOAD as u32 {
+                if result.is_ok() {
+                    panic!("Payload was too large");
+                }
+            } else {
+                result.unwrap();
+            }
+        }
+
+        // Regardless of payload correctness, it should never crash.
+        #[test]
+        fn sign_attached_request_never_panics(payload in prop::collection::vec(u8::MIN..u8::MAX, 0..PESIGN_MAX_PAYLOAD)) {
+            let _ = SignAttachedRequest::try_from(payload.as_slice());
+        }
+
+        // Generate some acceptable requests using random token and certificate names
+        #[test]
+        fn sign_attached_request(name in "\\PC+") {
+            let mut payload = Vec::from(0_u32.to_ne_bytes());
+            let name_bytes = name.as_bytes();
+            for _ in 0..2 {
+                payload.extend_from_slice((name_bytes.len() as u32 + 1).to_ne_bytes().as_slice());
+                payload.extend_from_slice(name_bytes);
+                payload.push(0);
+            }
+
+            SignAttachedRequest::try_from(payload.as_slice()).unwrap();
+        }
+
     }
 
     // Assert the socket is removed when the service stops

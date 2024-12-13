@@ -19,7 +19,7 @@ async fn main() -> Result<(), anyhow::Error> {
         .with_writer(std::io::stderr);
     let registry = tracing_subscriber::registry()
         .with(stderr_layer)
-        .with(EnvFilter::from_env("SIGUL_PESIGN_LOG"));
+        .with(EnvFilter::from_env("SIGUL_PESIGN_BRIDGE_LOG"));
     tracing::subscriber::set_global_default(registry)
         .expect("Programming error: set_global_default should only be called once.");
 
@@ -28,7 +28,12 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let opts = cli::Cli::parse();
     match opts.command {
-        cli::Command::Listen => service::listen(opts.socket, halt_token)?.await?,
+        cli::Command::Listen {
+            sigul_passphrase_path,
+        } => {
+            tracing::info!(?sigul_passphrase_path, "Loading sigul secret");
+            service::listen(opts.socket, halt_token)?.await?
+        }
         cli::Command::Status => status(opts.socket).await,
     }
 }

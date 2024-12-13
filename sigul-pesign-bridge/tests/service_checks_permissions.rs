@@ -16,7 +16,7 @@ fn stops_world_readable() -> Result<()> {
     nix::sys::stat::umask(Mode::empty());
     let mut command = Command::cargo_bin("sigul-pesign-bridge")?;
     let output = command
-        .env("SIGUL_PESIGN_LOG", "trace")
+        .env("SIGUL_PESIGN_BRIDGE_LOG", "trace")
         .arg(format!("--socket={socket}"))
         .arg("listen")
         .stderr(Stdio::piped())

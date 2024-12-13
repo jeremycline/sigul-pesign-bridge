@@ -18,7 +18,7 @@ use clap::Parser;
 #[command(version)]
 pub(crate) struct Cli {
     /// The path to use for the unix socket the service creates
-    #[arg(long, env = "SIGUL_PESIGN_SOCKET", default_value_os_t = PathBuf::from("/run/sigul-pesign/service.sock"))]
+    #[arg(long, env = "SIGUL_PESIGN_BRIDGE_SOCKET", default_value_os_t = PathBuf::from("/run/sigul-pesign-bridge/service.sock"))]
     pub socket: PathBuf,
     #[command(subcommand)]
     pub command: Command,
@@ -27,7 +27,15 @@ pub(crate) struct Cli {
 #[derive(clap::Subcommand, Debug)]
 pub(crate) enum Command {
     /// Run the service.
-    Listen,
+    Listen {
+        /// The path to a file containing the passphrase to unlock the sigul client certificate.
+        ///
+        /// If using systemd to manage the service, it will first look for any systemd credential
+        /// loaded with LoadCredentialsEncrypted and the "sigul-passphrase" ID. If that is not found
+        /// it will fall back to using this command-line argument to discover the secret.
+        #[arg(long, env = "SIGUL_PASSPHRASE_PATH")]
+        sigul_passphrase_path: Option<PathBuf>,
+    },
     /// Query the status of the service.
     Status,
 }

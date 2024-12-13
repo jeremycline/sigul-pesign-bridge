@@ -22,7 +22,7 @@ use nix::sys::{
     signal::{self, Signal},
     stat::Mode,
 };
-use tempfile::NamedTempFile;
+use tempfile::{tempdir, NamedTempFile};
 
 static UMASK: Once = Once::new();
 
@@ -44,9 +44,11 @@ fn run_command(mut client_command: Command) -> Result<(Output, Output)> {
             "{socket_path} exists; unable to start test instance"
         ));
     };
+    let working_dir = tempdir()?;
     let mut server_command = Command::cargo_bin("sigul-pesign-bridge")?;
     server_command
-        .env("SIGUL_PESIGN_LOG", "trace")
+        .env("RUNTIME_DIRECTORY", working_dir.path())
+        .env("SIGUL_PESIGN_BRIDGE_LOG", "trace")
         .arg(format!("--socket={socket_path}"))
         .arg("listen")
         .stderr(Stdio::piped())
@@ -63,12 +65,24 @@ fn run_command(mut client_command: Command) -> Result<(Output, Output)> {
     }
 
     let client_output = client_command.output()?;
+    println!(
+        "client_stdout: {}",
+        String::from_utf8_lossy(&client_output.stdout)
+    );
+    println!(
+        "client_stderr: {}",
+        String::from_utf8_lossy(&client_output.stderr)
+    );
 
     signal::kill(
         nix::unistd::Pid::from_raw(service.id().try_into()?),
         Signal::SIGTERM,
     )?;
     let service_output = service.wait_with_output()?;
+    println!(
+        "service_stderr: {}",
+        String::from_utf8_lossy(&service_output.stderr)
+    );
 
     Ok((client_output, service_output))
 }
@@ -94,23 +108,19 @@ fn is_unlocked() -> Result<()> {
 
 #[test]
 fn sign_attached() -> Result<()> {
-    let out_file = "/tmp/sample-uefi.signed.efi";
+    let output_dir = tempfile::tempdir()?;
+    let out_file = output_dir.path().join("sample-uefi.signed.efi");
     let mut in_file = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     in_file.push("../target/x86_64-unknown-uefi/debug/sample-uefi.efi");
 
     let mut client_command = Command::new("pesign-client");
     client_command
         .arg("--sign")
-        .arg("--token=Test Cert DB")
-        .arg("--certificate=Test Certificate")
+        .arg("--token=signing-key")
+        .arg("--certificate=codesigning")
         .arg(format!("--infile={}", in_file.as_path().display()))
-        .arg(format!("--outfile={}", out_file));
+        .arg(format!("--outfile={}", &out_file.as_path().display()));
     let (client_output, service_output) = run_command(client_command)?;
-
-    let client_stderr = String::from_utf8_lossy(&client_output.stderr);
-    let service_stderr = String::from_utf8_lossy(&service_output.stderr);
-    println!("{}", client_stderr);
-    println!("{}", service_stderr);
 
     assert!(client_output.status.success());
     assert!(service_output.status.success());
@@ -126,7 +136,7 @@ fn sign_attached() -> Result<()> {
     );
     let output_signature_list = Command::new("sbverify")
         .arg("--list")
-        .arg(out_file)
+        .arg(&out_file)
         .output()?;
     println!("{}", String::from_utf8_lossy(&output_signature_list.stderr));
     println!(
@@ -139,7 +149,7 @@ fn sign_attached() -> Result<()> {
     let output_signed = Command::new("sbverify")
         .arg("--cert")
         .arg(&signing_cert)
-        .arg(out_file)
+        .arg(&out_file)
         .output()?;
     assert!(output_signed.status.success());
     let input_signed = Command::new("sbverify")

@@ -143,4 +143,7 @@ jobs:
           # GitHub Actions does not use the container's WORKDIR.
           cp -r /srv/siguldry/* .
 
-          cargo test --all-features --workspace --no-fail-fast -- --nocapture
+          mkdir -p /run/pesign/
+
+      - name: Integration tests
+        run: RUNTIME_DIRECTORY=/run/pesign cargo test --all-features --workspace -- --nocapture
