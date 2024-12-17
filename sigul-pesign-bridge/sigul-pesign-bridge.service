@@ -3,14 +3,14 @@ Description=Bridge pesign-client requests to Sigul
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/sigul-pesign-bridge --socket=/run/pesign/socket listen
+ExecStart=/usr/bin/sigul-pesign-bridge listen
 User=pesign
 Group=pesign
 Restart=on-failure
 # Refer to https://docs.rs/tracing-subscriber/0.3.19/tracing_subscriber/filter/struct.EnvFilter.html#directives
 # for more fine-grain logging output.
 Environment=SIGUL_PESIGN_BRIDGE_LOG=info
-Environment=SIGUL_PASSPHRASE_PATH=%d/sigul-passphrase
+Environment=SIGUL_PESIGN_BRIDGE_CONFIG=/etc/sigul-pesign-bridge/config.toml
 
 # The socket relies on filesystem permissions to control who can request
 # signatures; no other authentication is used so it's important the socket
@@ -30,8 +30,12 @@ ConfigurationDirectoryMode=750
 # password-protected TLS certificate. The password can be provided
 # via systemd's Credentials features.
 #
-# You can use the systemd-cred utility to set up the passphrase file.
-#LoadCredentialsEncrypted=sigul-passphrase:/etc/sigul-pesign-bridge/sigul-passphrase
+# You can use the systemd-creds utility to set up the passphrase file.
+# For example:
+# $ systemd-ask-password -n | systemd-creds encrypt - /etc/sigul-pesign-bridge/sigul-key-passphrase
+# $ systemd-ask-password -n | systemd-creds encrypt - /etc/sigul-pesign-bridge/nss-database-passphrase
+LoadCredentialsEncrypted=sigul-key-passphrase:/etc/sigul-pesign-bridge/sigul-key-passphrase
+LoadCredentialsEncrypted=nss-database-passphrase:/etc/sigul-pesign-bridge/nss-database-passphrase
 
 # Opt-in to most systemd sandboxing
 PrivateTmp=true
@@ -44,8 +48,7 @@ ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectKernelLogs=true
 ProtectControlGroups=true
-# The service offers a Unix socket and communicates with the Sigul bridge over
-# the network.
+# The service offers a Unix socket and communicates with the Sigul bridge over TLS.
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 LockPersonality=true
 MemoryDenyWriteExecute=true

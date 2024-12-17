@@ -1,15 +1,13 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) Microsoft Corporation.
 
-use std::path::PathBuf;
-
 use clap::Parser;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio_util::sync::CancellationToken;
-use tracing::instrument;
 use tracing_subscriber::{fmt::format::FmtSpan, layer::SubscriberExt, EnvFilter};
 
 mod cli;
+mod config;
 mod service;
 
 #[tokio::main(flavor = "current_thread")]
@@ -28,19 +26,14 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let opts = cli::Cli::parse();
     match opts.command {
-        cli::Command::Listen {
-            sigul_passphrase_path,
-        } => {
-            tracing::info!(?sigul_passphrase_path, "Loading sigul secret");
-            service::listen(opts.socket, halt_token)?.await?
+        cli::Command::Listen => {
+            service::listen(opts.config.unwrap_or_default(), halt_token)?.await?
         }
-        cli::Command::Status => status(opts.socket).await,
+        cli::Command::Config => {
+            println!("{}", opts.config.unwrap_or_default());
+            Ok(())
+        }
     }
-}
-
-#[instrument(ret)]
-async fn status(path: PathBuf) -> Result<(), anyhow::Error> {
-    Ok(())
 }
 
 /// Install and manage signal handlers for the process.

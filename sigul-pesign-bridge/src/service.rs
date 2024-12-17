@@ -10,7 +10,7 @@ use std::{
         fd::{AsFd, AsRawFd, FromRawFd, RawFd},
         unix::fs::PermissionsExt,
     },
-    path::{Path, PathBuf},
+    path::Path,
     process::Stdio,
     time::Duration,
 };
@@ -31,6 +31,8 @@ use tokio::{
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{instrument, Instrument};
+
+use crate::config::Config;
 
 /// The version of the pesign daemon interface we support.
 ///
@@ -208,20 +210,29 @@ impl TryFrom<u32> for Command {
     }
 }
 
+/// Listen on a Unix socket on the given path.
+///
+/// This function will bind the socket and check its permissions,
+/// then spawn an asynchronous worker to handle requests. To stop
+/// the worker, cancel the given `halt_token` and then await the
+/// returned [`JoinHandle`].
+///
+/// Pending requests will be allowed to complete before the task
+/// completes.
 #[instrument(err, skip_all)]
 pub(crate) fn listen(
-    path: PathBuf,
+    config: Config,
     halt_token: CancellationToken,
 ) -> anyhow::Result<JoinHandle<anyhow::Result<()>>> {
-    let listener = UnixListener::bind(&path)
-        .with_context(|| format!("Failed to bind to {}", &path.display()))?;
-    let metadata = std::fs::metadata(&path)?;
+    let listener = UnixListener::bind(&config.socket_path)
+        .with_context(|| format!("Failed to bind to {}", &config.socket_path.display()))?;
+    let metadata = std::fs::metadata(&config.socket_path)?;
     if metadata.permissions().mode() & Mode::S_IRWXO.bits() != 0 {
         return Err(anyhow!(
             "Other users have access to the socket, adjust the service umask!"
         ));
     }
-    tracing::info!(socket=?path, "Listening");
+    tracing::info!(socket=?config.socket_path, "Listening");
 
     let request_tracker = TaskTracker::new();
 
@@ -229,16 +240,16 @@ pub(crate) fn listen(
         loop {
             tokio::select! {
                 _ = halt_token.cancelled() => {
-                    tracing::info!(socket=?path, "Shutdown requested, no new requests will be accepted");
+                    tracing::info!(socket=?config.socket_path, "Shutdown requested, no new requests will be accepted");
                     break;
                 }
                 result = listener.accept() => {
                     match result {
                         Ok((unix_stream, _)) => {
-                            request_tracker.spawn(request(unix_stream).instrument(tracing::Span::current()));
+                            request_tracker.spawn(request(config.clone(), unix_stream).instrument(tracing::Span::current()));
                         },
                         Err(error) => {
-                            tracing::error!(socket=?path, ?error, "Failed to accept request");
+                            tracing::error!(socket=?config.socket_path, ?error, "Failed to accept request");
                         },
                     }
                 }
@@ -247,9 +258,9 @@ pub(crate) fn listen(
 
         // Remove the socket and then wait for any requests in progress to complete before
         // exiting.
-        std::fs::remove_file(&path)
-            .with_context(|| format!("Failed to remove socket {}", &path.display()))?;
-        tracing::debug!(socket=?path, "Successfully removed socket");
+        std::fs::remove_file(&config.socket_path)
+            .with_context(|| format!("Failed to remove socket {}", &config.socket_path.display()))?;
+        tracing::debug!(socket=?config.socket_path, "Successfully removed socket");
         tracing::info!(
             pending_requests = request_tracker.len(),
             "Waiting for pending requests to complete"
@@ -262,12 +273,10 @@ pub(crate) fn listen(
 }
 
 #[instrument(skip_all, ret, fields(request_id = uuid::Uuid::now_v7().to_string()))]
-async fn request(unix_stream: UnixStream) -> Result<(), anyhow::Error> {
-    // TODO: This is obviously not long enough for a signing request; make it configurable
-    // or extremely long.
+async fn request(config: Config, unix_stream: UnixStream) -> Result<(), anyhow::Error> {
     let result = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        request_handler(unix_stream),
+        Duration::from_secs(config.request_timeout_secs.get()),
+        request_handler(config, unix_stream),
     )
     .await;
     if result.is_err() {
@@ -277,7 +286,10 @@ async fn request(unix_stream: UnixStream) -> Result<(), anyhow::Error> {
     result?
 }
 
-async fn request_handler(mut unix_stream: UnixStream) -> Result<(), anyhow::Error> {
+async fn request_handler(
+    _config: Config,
+    mut unix_stream: UnixStream,
+) -> Result<(), anyhow::Error> {
     loop {
         // Read the command header, which gives us the requested command and payload size.
         let mut buf = [0_u8; PESIGN_HEADER_SIZE];
@@ -668,6 +680,8 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_util::sync::CancellationToken;
 
+    use crate::config::Config;
+
     use super::{
         Header, SignAttachedRequest, CMD_GET_CMD_VERSION, PESIGND_VERSION, PESIGN_MAX_PAYLOAD,
     };
@@ -746,16 +760,19 @@ mod tests {
     async fn socket_is_cleaned_up() -> Result<()> {
         set_umask();
         let socket_dir = tempfile::tempdir()?;
-        let socket_path = socket_dir.path().join("socket");
+        let config = Config {
+            socket_path: socket_dir.path().join("socket"),
+            ..Default::default()
+        };
         let cancel_token = CancellationToken::new();
 
-        let server_task = super::listen(socket_path.clone(), cancel_token.clone())?;
+        let server_task = super::listen(config.clone(), cancel_token.clone())?;
 
-        let _ = std::fs::metadata(&socket_path)?;
+        let _ = std::fs::metadata(&config.socket_path)?;
         cancel_token.cancel();
         server_task.await??;
 
-        if let Ok(_metadata) = std::fs::metadata(&socket_path) {
+        if let Ok(_metadata) = std::fs::metadata(&config.socket_path) {
             panic!("The socket was not cleaned up!");
         }
 
@@ -768,12 +785,17 @@ mod tests {
     async fn rejects_large_payloads() -> Result<()> {
         set_umask();
         let socket_dir = tempfile::tempdir()?;
-        let socket_path = socket_dir.path().join("socket");
+        let config = Config {
+            socket_path: socket_dir.path().join("socket"),
+            ..Default::default()
+        };
         let cancel_token = CancellationToken::new();
 
-        let server_task = super::listen(socket_path.clone(), cancel_token.clone())?;
+        let server_task = super::listen(config.clone(), cancel_token.clone())?;
         let client_task = tokio::spawn(async move {
-            let mut conn = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
+            let mut conn = tokio::net::UnixStream::connect(&config.socket_path)
+                .await
+                .unwrap();
 
             let mut buf = BytesMut::new();
             buf.put_u32_ne(PESIGND_VERSION);
@@ -805,13 +827,18 @@ mod tests {
     async fn listen_waits_for_outstanding_tasks() -> Result<()> {
         set_umask();
         let socket_dir = tempfile::tempdir()?;
-        let socket_path = socket_dir.path().join("socket");
+        let config = Config {
+            socket_path: socket_dir.path().join("socket"),
+            ..Default::default()
+        };
         let cancel_token = CancellationToken::new();
 
-        let server_task = super::listen(socket_path.clone(), cancel_token.clone())?;
+        let server_task = super::listen(config.clone(), cancel_token.clone())?;
 
         let client_task = tokio::spawn(async move {
-            let mut conn = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
+            let mut conn = tokio::net::UnixStream::connect(&config.socket_path)
+                .await
+                .unwrap();
 
             cancel_token.cancel();
 

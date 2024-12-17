@@ -49,7 +49,6 @@ fn run_command(mut client_command: Command) -> Result<(Output, Output)> {
     server_command
         .env("RUNTIME_DIRECTORY", working_dir.path())
         .env("SIGUL_PESIGN_BRIDGE_LOG", "trace")
-        .arg(format!("--socket={socket_path}"))
         .arg("listen")
         .stderr(Stdio::piped())
         .stdout(Stdio::piped());

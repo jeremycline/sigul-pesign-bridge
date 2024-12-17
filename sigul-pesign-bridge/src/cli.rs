@@ -1,25 +1,33 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) Microsoft Corporation.
 
-use std::path::PathBuf;
-
 use clap::Parser;
 
-/// A sigul client that offers the pesign daemon interface
-///
-/// Run a service that presents a Unix socket like the pesign command-line tool offers when it is
-/// run as a daemon.
+use crate::config::{self, Config};
+
+/// An alternative to the pesign daemon interface.
 ///
 /// Rather than signing the PE file, however, this application will act as a sigul client and
 /// forward it to a sigul signing server.
+///
+/// Log configuration is provided using the "SIGUL_PESIGN_BRIDGE_LOG"
+/// environment variable with one or more comma-separated directives. In short,
+/// filters can be plain verbosity levels ("trace", "debug", "info", "warn",
+/// "error"), or more complex filtering at the span or event level.
+///
+/// The complete format is documented at
+/// https://docs.rs/tracing-subscriber/0.3.19/tracing_subscriber/filter/struct.EnvFilter.html#directives.
 ///
 /// The Unix socket this service offers can be used by pesign-client.
 #[derive(Parser, Debug)]
 #[command(version)]
 pub(crate) struct Cli {
-    /// The path to use for the unix socket the service creates
-    #[arg(long, env = "SIGUL_PESIGN_BRIDGE_SOCKET", default_value_os_t = PathBuf::from("/run/sigul-pesign-bridge/service.sock"))]
-    pub socket: PathBuf,
+    /// Path to the configuration file.
+    ///
+    /// If no path is provided, the defaults are used. To view the service
+    /// defaults, run the `config` subcommand.
+    #[arg(long, short, env = "SIGUL_PESIGN_BRIDGE_CONFIG", value_parser = config::load)]
+    pub config: Option<Config>,
     #[command(subcommand)]
     pub command: Command,
 }
@@ -27,15 +35,10 @@ pub(crate) struct Cli {
 #[derive(clap::Subcommand, Debug)]
 pub(crate) enum Command {
     /// Run the service.
-    Listen {
-        /// The path to a file containing the passphrase to unlock the sigul client certificate.
-        ///
-        /// If using systemd to manage the service, it will first look for any systemd credential
-        /// loaded with LoadCredentialsEncrypted and the "sigul-passphrase" ID. If that is not found
-        /// it will fall back to using this command-line argument to discover the secret.
-        #[arg(long, env = "SIGUL_PASSPHRASE_PATH")]
-        sigul_passphrase_path: Option<PathBuf>,
-    },
-    /// Query the status of the service.
-    Status,
+    Listen,
+    /// Print the current service configuration to standard output.
+    ///
+    /// If no config file is provided, the defaults are printed. For complete details on each
+    /// configuration option, refer to the the documentation.
+    Config,
 }
